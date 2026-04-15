@@ -17,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files (index.html)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -31,7 +30,21 @@ class SearchRequest(BaseModel):
     contexto: str = ""
     fontes: list[str] = []
 
+def clean_text(text: str) -> str:
+    """Normalize fancy quotes and special chars to ASCII equivalents."""
+    replacements = {
+        '\u201c': '"', '\u201d': '"',  # curly double quotes
+        '\u2018': "'", '\u2019': "'",  # curly single quotes
+        '\u2013': '-', '\u2014': '-',  # en/em dash
+        '\u00e9': 'e', '\u00e3': 'a', '\u00e7': 'c',  # accented (keep if needed)
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
 def extract_json(text: str):
+    text = clean_text(text)
+    
     # Strategy 1: ```json ... ``` fence
     fence = re.search(r'```json\s*([\s\S]*?)\s*```', text)
     if fence:
@@ -39,7 +52,8 @@ def extract_json(text: str):
             return json.loads(fence.group(1))
         except:
             pass
-    # Strategy 2: find outermost { } candidates, try longest first
+
+    # Strategy 2: find outermost { } block (longest wins)
     candidates = []
     depth = 0
     start = -1
@@ -58,7 +72,8 @@ def extract_json(text: str):
             return json.loads(c)
         except:
             pass
-    # Strategy 3: strip control chars
+
+    # Strategy 3: strip control chars and retry
     try:
         clean = re.sub(r'[\x00-\x1F\x7F]', ' ', text)
         clean = re.sub(r'```json|```', '', clean)
@@ -67,67 +82,47 @@ def extract_json(text: str):
             return json.loads(m.group(0))
     except:
         pass
+
     return None
 
 SOURCE_LABELS = {
-    'google': 'Google / Mídia geral',
-    'doe': 'Diário Oficial SP',
-    'transparencia': 'Portal Transparência / SIAFEM',
+    'google': 'Google / Midia geral',
+    'doe': 'Diario Oficial SP',
+    'transparencia': 'Portal Transparencia / SIAFEM',
     'prefeituras': 'Sites de prefeituras',
     'licitacoes': 'BEC / ComprasNet',
     'regulacao': 'ANP / ARSESP / CETESB',
-    'concessionarias': 'Comgás / Naturgy / NECTA',
-    'associacoes': 'Abiogás / IBP / Associações',
-    'noticias': 'Portais de notícias setoriais',
+    'concessionarias': 'Comgas / Naturgy / NECTA',
+    'associacoes': 'Abiogas / IBP / Associacoes',
+    'noticias': 'Portais de noticias setoriais',
 }
 
 @app.post("/buscar")
 async def buscar(req: SearchRequest):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {"error": "Chave de API não configurada no servidor."}
+        return {"error": "Chave de API nao configurada no servidor."}
 
     source_labels = ", ".join([SOURCE_LABELS.get(s, s) for s in req.fontes])
 
-    system_prompt = """Você é um analista especializado em projetos de infraestrutura e energia do estado de São Paulo, com acesso a múltiplas fontes de informação. Sua função é buscar e estruturar dados sobre projetos específicos solicitados pela Secretaria de Meio Ambiente, Infraestrutura e Logística (SEMIL-SP), especialmente sua Subsecretaria de Energia e Mineração.
+    system_prompt = """Voce e um analista especializado em projetos de infraestrutura e energia do estado de Sao Paulo. Sua funcao e buscar e estruturar dados sobre projetos especificos solicitados pela SEMIL-SP, Subsecretaria de Energia e Mineracao.
 
-Para cada projeto consultado, retorne EXCLUSIVAMENTE um objeto JSON válido (sem markdown, sem texto fora do JSON) com a seguinte estrutura:
+REGRA CRITICA: Retorne APENAS um objeto JSON valido e nada mais. Sem texto antes, sem texto depois, sem markdown, sem blocos de codigo, sem aspas especiais. Apenas o JSON puro iniciando com { e terminando com }.
 
-{
-  "projeto": "nome do projeto",
-  "municipio": "município ou lista de municípios",
-  "regiao_administrativa": "região administrativa do estado de SP ou vazia",
-  "regiao_metropolitana": "região metropolitana ou vazia",
-  "tipo": "tipo do empreendimento",
-  "investimento_estado_reais": "valor em R$ ou vazio",
-  "investimento_outros_reais": "valor em R$ ou vazio",
-  "populacao_impactada": "número de habitantes ou vazio",
-  "beneficios_populacao": "descrição dos benefícios",
-  "situacao": "Em andamento | Parado | Previsto | Concluído | Desconhecido",
-  "data_inicio": "mês/ano ou ano",
-  "data_termino_previsto": "mês/ano ou ano",
-  "campo_funcional_semil": "campo funcional relevante na SEMIL",
-  "produto_ppa": "produto do PPA 2024-2027 relacionado ou vazio",
-  "politica_plano": "política ou plano estadual relacionado",
-  "observacoes": "síntese das informações encontradas, fontes consultadas, e grau de confiança dos dados (Alto/Médio/Baixo). Mencionar URLs ou publicações quando disponíveis.",
-  "fontes_encontradas": ["lista de fontes onde informações foram localizadas"],
-  "confianca_percentual": número entre 0 e 100
-}
+Use APENAS aspas duplas simples (") nos campos JSON. Nunca use aspas tipograficas ou curvadas.
 
-Priorize informações de: Diário Oficial do Estado de SP, ANP, ARSESP, CETESB, portais de transparência estadual, sites de concessionárias (Comgás, Naturgy, NECTA), Abiogás, IBP, e portais de notícias setoriais. Período de relevância: projetos iniciados após janeiro/2023 ou com previsão de conclusão após dezembro/2026.
+Estrutura obrigatoria:
+{"projeto":"string","municipio":"string","regiao_administrativa":"string","regiao_metropolitana":"string","tipo":"string","investimento_estado_reais":"string","investimento_outros_reais":"string","populacao_impactada":"string","beneficios_populacao":"string","situacao":"Em andamento ou Parado ou Previsto ou Concluido ou Desconhecido","data_inicio":"string","data_termino_previsto":"string","campo_funcional_semil":"string","produto_ppa":"string","politica_plano":"string","observacoes":"string","fontes_encontradas":["string"],"confianca_percentual":0}
 
-Se não encontrar dados suficientes, preencha com "Não localizado" e explique nas observações."""
+Para campos sem informacao use "Nao localizado". Nao use caracteres especiais dentro dos valores de string que possam quebrar o JSON."""
 
-    user_msg = f"""Busque informações sobre o seguinte projeto/empreendimento de infraestrutura ou energia no estado de São Paulo:
+    user_msg = f"""Busque informacoes sobre o projeto abaixo e retorne APENAS o JSON:
 
 Projeto: {req.projeto}
-{f'Município: {req.municipio}' if req.municipio else ''}
+{f'Municipio: {req.municipio}' if req.municipio else ''}
 {f'Tipo: {req.tipo}' if req.tipo else ''}
-{f'Contexto adicional: {req.contexto}' if req.contexto else ''}
-
-Fontes prioritárias solicitadas: {source_labels}
-
-Retorne o JSON estruturado conforme orientado."""
+{f'Contexto: {req.contexto}' if req.contexto else ''}
+Fontes: {source_labels}"""
 
     payload = {
         "model": "claude-sonnet-4-20250514",
@@ -150,7 +145,6 @@ Retorne o JSON estruturado conforme orientado."""
         )
         data = response.json()
 
-    # Extract text blocks
     raw_text = ""
     if "content" in data:
         for block in data["content"]:
@@ -162,21 +156,21 @@ Retorne o JSON estruturado conforme orientado."""
     if not result:
         result = {
             "projeto": req.projeto,
-            "municipio": req.municipio or "Não localizado",
+            "municipio": req.municipio or "Nao localizado",
             "regiao_administrativa": "",
             "regiao_metropolitana": "",
-            "tipo": req.tipo or "Não localizado",
-            "investimento_estado_reais": "Não localizado",
-            "investimento_outros_reais": "Não localizado",
-            "populacao_impactada": "Não localizado",
-            "beneficios_populacao": "Não localizado",
+            "tipo": req.tipo or "Nao localizado",
+            "investimento_estado_reais": "Nao localizado",
+            "investimento_outros_reais": "Nao localizado",
+            "populacao_impactada": "Nao localizado",
+            "beneficios_populacao": "Nao localizado",
             "situacao": "Desconhecido",
-            "data_inicio": "Não localizado",
-            "data_termino_previsto": "Não localizado",
-            "campo_funcional_semil": "Não localizado",
+            "data_inicio": "Nao localizado",
+            "data_termino_previsto": "Nao localizado",
+            "campo_funcional_semil": "Nao localizado",
             "produto_ppa": "",
             "politica_plano": "",
-            "observacoes": raw_text or "Não foi possível estruturar os dados retornados.",
+            "observacoes": raw_text or "Nao foi possivel estruturar os dados.",
             "fontes_encontradas": req.fontes,
             "confianca_percentual": 10
         }
