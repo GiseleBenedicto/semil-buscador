@@ -17,7 +17,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Serve static files (index.html)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -31,15 +30,24 @@ class SearchRequest(BaseModel):
     contexto: str = ""
     fontes: list[str] = []
 
+def clean_text(text: str) -> str:
+    replacements = {
+        '\u201c': '"', '\u201d': '"',
+        '\u2018': "'", '\u2019': "'",
+        '\u2013': '-', '\u2014': '-',
+    }
+    for old, new in replacements.items():
+        text = text.replace(old, new)
+    return text
+
 def extract_json(text: str):
-    # Strategy 1: ```json ... ``` fence
+    text = clean_text(text)
     fence = re.search(r'```json\s*([\s\S]*?)\s*```', text)
     if fence:
         try:
             return json.loads(fence.group(1))
         except:
             pass
-    # Strategy 2: find outermost { } candidates, try longest first
     candidates = []
     depth = 0
     start = -1
@@ -58,7 +66,6 @@ def extract_json(text: str):
             return json.loads(c)
         except:
             pass
-    # Strategy 3: strip control chars
     try:
         clean = re.sub(r'[\x00-\x1F\x7F]', ' ', text)
         clean = re.sub(r'```json|```', '', clean)
@@ -70,74 +77,90 @@ def extract_json(text: str):
     return None
 
 SOURCE_LABELS = {
-    'google': 'Google / Mídia geral',
-    'doe': 'Diário Oficial SP',
-    'transparencia': 'Portal Transparência / SIAFEM',
+    'google': 'Google / Midia geral',
+    'doe': 'Diario Oficial SP',
+    'transparencia': 'Portal Transparencia / SIAFEM',
     'prefeituras': 'Sites de prefeituras',
     'licitacoes': 'BEC / ComprasNet',
     'regulacao': 'ANP / ARSESP / CETESB',
-    'concessionarias': 'Comgás / Naturgy / NECTA',
-    'associacoes': 'Abiogás / IBP / Associações',
-    'noticias': 'Portais de notícias setoriais',
+    'concessionarias': 'Comgas / Naturgy / NECTA',
+    'associacoes': 'Abiogas / IBP / Associacoes',
+    'noticias': 'Portais de noticias setoriais',
 }
 
 @app.post("/buscar")
 async def buscar(req: SearchRequest):
     api_key = os.environ.get("ANTHROPIC_API_KEY")
     if not api_key:
-        return {"error": "Chave de API não configurada no servidor."}
+        return {"error": "Chave de API nao configurada."}
 
     source_labels = ", ".join([SOURCE_LABELS.get(s, s) for s in req.fontes])
 
-    system_prompt = """Você é um analista especializado em projetos de infraestrutura e energia do estado de São Paulo, com acesso a múltiplas fontes de informação. Sua função é buscar e estruturar dados sobre projetos específicos solicitados pela Secretaria de Meio Ambiente, Infraestrutura e Logística (SEMIL-SP), especialmente sua Subsecretaria de Energia e Mineração.
+    system_prompt = """Voce e um analista especializado em projetos de infraestrutura e energia do estado de Sao Paulo. Sua funcao e realizar pesquisa aprofundada sobre projetos especificos usando web search extensivo.
 
-Para cada projeto consultado, retorne EXCLUSIVAMENTE um objeto JSON válido (sem markdown, sem texto fora do JSON) com a seguinte estrutura:
+INSTRUCOES DE PESQUISA:
+Pesquise obrigatoriamente nestas fontes, usando multiplas buscas:
+- Governo SP: sp.gov.br, semil.sp.gov.br, desenvolvimentosp.com.br, agenciasp.sp.gov.br, fazenda.sp.gov.br
+- Reguladores: anp.gov.br, arsesp.sp.gov.br, cetesb.sp.gov.br, aneel.gov.br
+- Transparencia: transparencia.sp.gov.br, portaldatransparencia.gov.br, siafem
+- Diario Oficial: imprensaoficial.com.br
+- Empresas: comgas.com.br, naturgy.com.br, necta.com.br, orizon.com.br, sabesp.com.br, cpfl.com.br, enel.com.br
+- Associacoes: abiogas.org.br, ibp.org.br, abegas.org.br, sindipeças
+- Jornais e midia: valor.com.br, folha.com.br, estadao.com.br, g1.globo.com, canalenergia.com.br, epbr.com.br, portalr3.com.br, novacana.com.br, segs.com.br
+- Licitacoes: bec.sp.gov.br, comprasnet.gov.br
+- BNDES, bancos de fomento, fundos de investimento
 
+REGRA CRITICA DE FORMATO:
+Retorne APENAS JSON puro. Nenhum texto fora do JSON. Sem markdown. Sem blocos de codigo.
+Use apenas aspas duplas simples ("). Nunca use aspas curvadas.
+
+REGRA CRITICA DE CAMPOS VAZIOS:
+Se nao encontrar informacao para um campo, deixe como string vazia "". NAO escreva "Nao localizado" nem "N/A".
+
+ESTRUTURA OBRIGATORIA (retorne exatamente estes campos):
 {
-  "projeto": "nome do projeto",
-  "municipio": "município ou lista de municípios",
-  "regiao_administrativa": "região administrativa do estado de SP ou vazia",
-  "regiao_metropolitana": "região metropolitana ou vazia",
-  "tipo": "tipo do empreendimento",
-  "investimento_estado_reais": "valor em R$ ou vazio",
-  "investimento_outros_reais": "valor em R$ ou vazio",
-  "populacao_impactada": "número de habitantes ou vazio",
-  "beneficios_populacao": "descrição dos benefícios",
-  "situacao": "Em andamento | Parado | Previsto | Concluído | Desconhecido",
-  "data_inicio": "mês/ano ou ano",
-  "data_termino_previsto": "mês/ano ou ano",
-  "campo_funcional_semil": "campo funcional relevante na SEMIL",
-  "produto_ppa": "produto do PPA 2024-2027 relacionado ou vazio",
-  "politica_plano": "política ou plano estadual relacionado",
-  "observacoes": "síntese das informações encontradas, fontes consultadas, e grau de confiança dos dados (Alto/Médio/Baixo). Mencionar URLs ou publicações quando disponíveis.",
-  "fontes_encontradas": ["lista de fontes onde informações foram localizadas"],
-  "confianca_percentual": número entre 0 e 100
-}
+  "projeto": "nome completo do projeto/empreendimento",
+  "municipio": "municipio(s) onde o projeto esta localizado",
+  "regiao_administrativa": "regiao administrativa do estado de SP",
+  "regiao_metropolitana": "regiao metropolitana se aplicavel",
+  "tipo": "tipo do empreendimento (ex: planta de biometano, gasoduto, usina, etc)",
+  "investimento_estado_reais": "valor investido pelo governo estadual em R$",
+  "investimento_outros_reais": "valor investido por outras fontes (federal, privado) em R$",
+  "populacao_impactada": "numero estimado de habitantes beneficiados",
+  "beneficios_populacao": "descricao objetiva dos beneficios diretos a populacao",
+  "situacao": "Em andamento ou Parado ou Previsto ou Concluido ou Desconhecido",
+  "data_inicio": "data ou periodo de inicio (mes/ano)",
+  "data_termino_previsto": "data ou periodo de conclusao prevista (mes/ano)",
+  "campo_funcional_semil": "area tematica na SEMIL (ex: Energia, Mineracao, Gas Natural, Biocombustiveis)",
+  "produto_ppa": "produto relacionado no PPA 2024-2027 do Estado de SP",
+  "politica_plano": "politica publica, decreto ou plano estadual relacionado",
+  "observacoes": "sintese factual das principais informacoes encontradas, sem repeticao dos campos acima",
+  "fontes": [
+    {"titulo": "nome do veiculo ou orgao", "url": "https://url-completa.com/pagina", "descricao": "o que foi encontrado nesta fonte"}
+  ],
+  "confianca_percentual": numero inteiro de 0 a 100
+}"""
 
-Priorize informações de: Diário Oficial do Estado de SP, ANP, ARSESP, CETESB, portais de transparência estadual, sites de concessionárias (Comgás, Naturgy, NECTA), Abiogás, IBP, e portais de notícias setoriais. Período de relevância: projetos iniciados após janeiro/2023 ou com previsão de conclusão após dezembro/2026.
-
-Se não encontrar dados suficientes, preencha com "Não localizado" e explique nas observações."""
-
-    user_msg = f"""Busque informações sobre o seguinte projeto/empreendimento de infraestrutura ou energia no estado de São Paulo:
+    user_msg = f"""Pesquise extensivamente sobre o seguinte projeto de infraestrutura ou energia no estado de Sao Paulo e retorne APENAS o JSON estruturado:
 
 Projeto: {req.projeto}
-{f'Município: {req.municipio}' if req.municipio else ''}
+{f'Municipio: {req.municipio}' if req.municipio else ''}
 {f'Tipo: {req.tipo}' if req.tipo else ''}
 {f'Contexto adicional: {req.contexto}' if req.contexto else ''}
 
-Fontes prioritárias solicitadas: {source_labels}
+Fontes prioritarias adicionais solicitadas: {source_labels}
 
-Retorne o JSON estruturado conforme orientado."""
+Realize pelo menos 5 buscas diferentes antes de responder. Priorize dados oficiais e recentes (2023-2026)."""
 
     payload = {
         "model": "claude-sonnet-4-20250514",
-        "max_tokens": 4000,
+        "max_tokens": 6000,
         "tools": [{"type": "web_search_20250305", "name": "web_search"}],
         "system": system_prompt,
         "messages": [{"role": "user", "content": user_msg}]
     }
 
-    async with httpx.AsyncClient(timeout=120.0) as client:
+    async with httpx.AsyncClient(timeout=180.0) as client:
         response = await client.post(
             "https://api.anthropic.com/v1/messages",
             headers={
@@ -150,35 +173,42 @@ Retorne o JSON estruturado conforme orientado."""
         )
         data = response.json()
 
-    # Extract text blocks
     raw_text = ""
     if "content" in data:
         for block in data["content"]:
             if block.get("type") == "text":
                 raw_text += block.get("text", "")
 
+    # Debug log
+    print("=== RAW RESPONSE ===")
+    print(repr(raw_text[:500]))
+    print("=== DATA KEYS ===")
+    print(data.keys() if isinstance(data, dict) else type(data))
+    if "error" in data:
+        print("API ERROR:", data["error"])
+
     result = extract_json(raw_text)
 
     if not result:
         result = {
             "projeto": req.projeto,
-            "municipio": req.municipio or "Não localizado",
+            "municipio": req.municipio or "",
             "regiao_administrativa": "",
             "regiao_metropolitana": "",
-            "tipo": req.tipo or "Não localizado",
-            "investimento_estado_reais": "Não localizado",
-            "investimento_outros_reais": "Não localizado",
-            "populacao_impactada": "Não localizado",
-            "beneficios_populacao": "Não localizado",
+            "tipo": req.tipo or "",
+            "investimento_estado_reais": "",
+            "investimento_outros_reais": "",
+            "populacao_impactada": "",
+            "beneficios_populacao": "",
             "situacao": "Desconhecido",
-            "data_inicio": "Não localizado",
-            "data_termino_previsto": "Não localizado",
-            "campo_funcional_semil": "Não localizado",
+            "data_inicio": "",
+            "data_termino_previsto": "",
+            "campo_funcional_semil": "",
             "produto_ppa": "",
             "politica_plano": "",
-            "observacoes": raw_text or "Não foi possível estruturar os dados retornados.",
-            "fontes_encontradas": req.fontes,
-            "confianca_percentual": 10
+            "observacoes": raw_text or "",
+            "fontes": [],
+            "confianca_percentual": 0
         }
 
     return result
