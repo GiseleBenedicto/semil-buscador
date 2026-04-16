@@ -74,7 +74,13 @@
   .field-value { font-size: 0.85rem; color: var(--ink); line-height: 1.4; font-weight: 500; }
   .field-value.empty { color: var(--mist); font-style: italic; font-weight: 400; font-size: 0.8rem; }
   .field-value.found { color: var(--sage); }
-  .sources-used { padding: 12px 18px; background: var(--sage-light); border-top: 1px solid var(--line); font-size: 0.78rem; color: var(--sage); }
+  .sources-used { padding: 14px 18px; background: var(--sage-light); border-top: 1px solid var(--line); font-size: 0.78rem; color: var(--sage); }
+  .sources-used strong { display: block; font-family: 'DM Mono', monospace; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.08em; margin-bottom: 8px; }
+  .fontes-list { display: flex; flex-direction: column; gap: 4px; }
+  .fonte-item { font-size: 0.8rem; line-height: 1.4; }
+  .fonte-item a { color: var(--sage); text-decoration: underline; text-underline-offset: 2px; }
+  .fonte-item a:hover { color: #2e5440; }
+  .field-value.empty { color: var(--line); font-size: 0.8rem; }
   .confidence-bar { padding: 12px 18px; display: flex; align-items: center; gap: 12px; border-top: 1px solid var(--line); background: var(--paper); }
   .conf-label { font-family: 'DM Mono', monospace; font-size: 0.65rem; text-transform: uppercase; letter-spacing: 0.06em; color: var(--mist); white-space: nowrap; }
   .bar-track { flex: 1; height: 6px; background: var(--line); border-radius: 3px; overflow: hidden; }
@@ -249,13 +255,31 @@ function getStatusClass(s) {
   return 'status-desconhecido';
 }
 function fv(val, cls='') {
-  if (!val || val==='' || val==='Não localizado' || val==='vazio') return `<div class="field-value empty">Não localizado</div>`;
+  if (!val || val === '' || val === 'Nao localizado' || val === 'Não localizado' || val === 'vazio' || val === 'N/A') {
+    return `<div class="field-value empty">—</div>`;
+  }
   return `<div class="field-value ${cls}">${val}</div>`;
+}
+
+function renderFontes(fontes) {
+  if (!fontes || fontes.length === 0) return '<span style="color:var(--mist)">Nenhuma fonte registrada</span>';
+  if (typeof fontes[0] === 'string') {
+    return fontes.map(f => `<span>${f}</span>`).join(' · ');
+  }
+  return fontes.map(f => {
+    const url = f.url || '';
+    const titulo = f.titulo || url;
+    const desc = f.descricao ? ` — ${f.descricao}` : '';
+    if (url) {
+      return `<div class="fonte-item"><a href="${url}" target="_blank" rel="noopener">↗ ${titulo}</a>${desc}</div>`;
+    }
+    return `<div class="fonte-item"><strong>${titulo}</strong>${desc}</div>`;
+  }).join('');
 }
 function renderResult(r) {
   const container = document.getElementById('resultsContainer');
   const conf = r.confianca_percentual || 0;
-  const fontes = Array.isArray(r.fontes_encontradas) ? r.fontes_encontradas.join(', ') : (r.fontes_encontradas || '—');
+  const fontesHtml = renderFontes(r.fontes || r.fontes_encontradas);
   container.innerHTML = `
     <div class="result-card">
       <div class="result-card-header">
@@ -283,7 +307,7 @@ function renderResult(r) {
         <div class="bar-track"><div class="bar-fill" style="width:${conf}%"></div></div>
         <span class="conf-pct">${conf}%</span>
       </div>
-      <div class="sources-used"><strong>Fontes consultadas: </strong>${fontes}</div>
+      <div class="sources-used"><strong>Fontes consultadas:</strong><div class="fontes-list">${fontesHtml}</div></div>
     </div>`;
   document.getElementById('resultsSection').classList.add('active');
   document.getElementById('resultsTitle').textContent = `Resultado · ${r.projeto || 'Projeto'}`;
